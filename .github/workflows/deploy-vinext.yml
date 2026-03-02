@@ -1,0 +1,90 @@
+name: Deploy to Cloudflare Workers via vinext
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install vinext and deps
+        run: npm install vinext vite @vitejs/plugin-rsc @cloudflare/vite-plugin --save-dev
+
+      - name: Run vinext init
+        run: npx vinext init --skip-check --force
+
+      - name: Build with vite
+        run: npx vite build
+
+      - name: Generate wrangler config and worker
+        run: npx vinext deploy --name nextjs-deploy-comparison --dry-run 2>/dev/null || true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Fix wrangler config and deploy
+        run: |
+          echo "=== Checking build output ==="
+          ls -la dist/ || echo "No dist directory"
+          ls -la dist/client/ || echo "No dist/client directory"
+          ls -la .output/ || echo "No .output directory"
+
+          if [ -f wrangler.jsonc ]; then
+            echo "=== Original wrangler.jsonc ==="
+            cat wrangler.jsonc
+            node -e "
+              const fs = require('fs');
+              let raw = fs.readFileSync('wrangler.jsonc', 'utf8');
+              let cleaned = raw.replace(/\/\/.*$/gm, '');
+              cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, '');
+              cleaned = cleaned.replace(/,\s*([}\]])/g, '\$1');
+              let obj = JSON.parse(cleaned);
+              // Find the actual assets directory
+              const possibleDirs = ['dist/client', 'dist', '.output/public', '.output/static'];
+              let found = '';
+              for (const d of possibleDirs) {
+                if (fs.existsSync(d)) { found = d; break; }
+              }
+              if (!found) found = 'dist/client';
+              if (obj.assets && typeof obj.assets === 'object') {
+                obj.assets.directory = found;
+              } else {
+                obj.assets = { directory: found };
+              }
+              fs.writeFileSync('wrangler.jsonc', JSON.stringify(obj, null, 2));
+              console.log('=== Fixed wrangler.jsonc ===');
+              console.log(JSON.stringify(obj, null, 2));
+            "
+          else
+            echo "No wrangler.jsonc found, creating one"
+            node -e "
+              const fs = require('fs');
+              const possibleDirs = ['dist/client', 'dist', '.output/public'];
+              let found = '';
+              for (const d of possibleDirs) {
+                if (fs.existsSync(d)) { found = d; break; }
+              }
+              if (!found) found = 'dist';
+              const config = {
+                name: 'nextjs-deploy-comparison',
+                compatibility_date: '2026-03-02',
+                compatibility_flags: ['nodejs_compat'],
+                main: './worker/index.ts',
+                assets: { directory: found }
+              };
+              fs.writeFileSync('wrangler.jsonc', JSON.stringify(config, null, 2));
+              console.log(JSON.stringify(config, null, 2));
+            "
+          fi
+
+          npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
