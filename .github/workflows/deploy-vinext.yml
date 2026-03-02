@@ -1,0 +1,60 @@
+name: Deploy to Cloudflare Workers via vinext
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install vinext and deps
+        run: npm install vinext vite @vitejs/plugin-rsc @cloudflare/vite-plugin wrangler --save-dev
+
+      - name: Run vinext init
+        run: npx vinext init --skip-check --force
+
+      - name: Build and attempt deploy (allow wrangler config failure)
+        id: vinext_deploy
+        continue-on-error: true
+        run: npx vinext deploy --name nextjs-deploy-comparison
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Fix wrangler.jsonc and redeploy
+        if: steps.vinext_deploy.outcome == 'failure'
+        run: |
+          echo "=== Current wrangler.jsonc ==="
+          cat wrangler.jsonc
+          echo ""
+          echo "=== Fixing wrangler.jsonc ==="
+          node -e "
+            const fs = require('fs');
+            const f = 'wrangler.jsonc';
+            let c = fs.readFileSync(f, 'utf8');
+            c = c.replace(/\/\/.*$/gm, '');
+            const cfg = JSON.parse(c);
+            // Fix assets directory
+            if (!cfg.assets) cfg.assets = {};
+            cfg.assets.directory = './dist/client';
+            // Point main to pre-built SSR output
+            cfg.main = './dist/server/ssr/index.js';
+            // Disable re-bundling since vinext already built everything
+            cfg.no_bundle = true;
+            // Remove images binding (requires ES module format which conflicts with service-worker)
+            delete cfg.images;
+            fs.writeFileSync(f, JSON.stringify(cfg, null, 2));
+            console.log('Fixed:', JSON.stringify(cfg, null, 2));
+          "
+          echo "=== Deploying with wrangler ==="
+          npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
